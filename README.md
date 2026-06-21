@@ -163,3 +163,27 @@ Este projeto é de uso **pessoal e educacional**. O download de conteúdo do Ins
 ## Licença
 
 MIT © 2026 Carlos Eduardo — veja [LICENSE](LICENSE)
+
+---
+
+## Outros projetos
+
+| Projeto | Descrição |
+|---------|-----------|
+| [abobiferramentas.com](https://abobiferramentas.com) | Site de download de APKs — MODs e FOSS para Android |
+| [abobireacao](https://github.com/abobicaduco/abobireacao) | App Android para reagir a vídeos com câmera |
+| [abobiplayer](https://github.com/abobicaduco/abobiplayer) | Player de vídeo local para Android (Flutter) |
+| [abobi-video-downloader](https://github.com/abobicaduco/abobi-video-downloader) | Baixador Android baseado em yt-dlp |
+| [DownloadManager](https://github.com/abobicaduco/DownloadManager) | Fila de downloads web com aria2 — React + Express |
+| [ServerCRON](https://github.com/abobicaduco/ServerCRON) | Portal Flask com agendador de scripts e histórico SQLite |
+| [abobi-shorts-upload-pipeline](https://github.com/abobicaduco/abobi-shorts-upload-pipeline) | Automação de upload para YouTube Shorts e TikTok |
+
+---
+
+## Apoie o projeto
+
+Se este projeto te ajudou e você quiser contribuir:
+
+**Chave PIX:** `f74458dc-2a36-49bd-9250-1cef4365ebb8`
+
+> Recebedor: Carlos Eduardo — qualquer valor é bem-vindo e ajuda a manter os projetos ativos.
