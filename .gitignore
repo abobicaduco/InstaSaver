@@ -45,3 +45,24 @@ app.*.map.json
 /android/app/release
 
 android/build/
+
+# ── Dados sensíveis — NUNCA commitar ─────────────────────────────────────────
+# Keystores / signing
+*.keystore
+*.jks
+key.properties
+android/key.properties
+
+# Variáveis de ambiente e segredos
+.env
+.env.*
+secrets.yaml
+secrets.json
+
+# Firebase / Google Services
+google-services.json
+GoogleService-Info.plist
+
+# Credenciais locais
+credentials.json
+service-account*.json
