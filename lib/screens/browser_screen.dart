@@ -23,21 +23,25 @@ class _BrowserScreenState extends State<BrowserScreen> {
       'Instagram/275.0.0.27.98';
 
   // ── JavaScript injetado em cada página ──────────────────────────────────
-  // Intercepta a API interna do Instagram para capturar URLs em qualidade
-  // máxima (incluindo todos os slides de carrossel), depois injeta um botão
-  // de download na barra de ações de cada post (ao lado do Like/Comentar).
+  //
+  // 1. Intercepta fetch/XHR para capturar URLs de máxima qualidade da API
+  //    interna do Instagram (incluindo todos os slides de carrossel).
+  //
+  // 2. Monitora cliques no botão ⋯ (Mais opções) de cada post e, quando
+  //    o menu nativo do Instagram abre, injeta nossas opções de download
+  //    no topo da lista — o usuário mantém acesso às opções originais.
   static const _js = r'''
 (function() {
   if (window.__abobiOk) return;
   window.__abobiOk = true;
 
-  // ── Comunicação com Flutter ───────────────────────────────────────────────
+  // ── Flutter handler ────────────────────────────────────────────────────
   function notify(type, data) {
     try { window.flutter_inappwebview.callHandler('onAbobi', JSON.stringify({type:type, data:data})); }
     catch(e) {}
   }
 
-  // ── Dicionário: shortcode → lista de mídias capturadas da API ────────────
+  // ── Cache: shortcode → mídias capturadas da API ────────────────────────
   var _cache = {};
 
   function storeMedia(o, d) {
@@ -47,7 +51,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
     var code = o.code || o.shortcode || o.pk;
     if (code) {
       var media = [];
-      // Carrossel (GraphQL web)
+      // Carrossel — formato GraphQL web
       if (o.edge_sidecar_to_children && o.edge_sidecar_to_children.edges) {
         o.edge_sidecar_to_children.edges.forEach(function(e) {
           var n = e&&e.node; if(!n) return;
@@ -55,8 +59,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
           else if (n.display_url) media.push({t:'photo', url:n.display_url});
         });
       }
-      // Carrossel (API mobile)
-      if (o.carousel_media && Array.isArray(o.carousel_media)) {
+      // Carrossel — formato API mobile
+      if (o.carousel_media) {
         o.carousel_media.forEach(function(m) {
           var c = m.image_versions2&&m.image_versions2.candidates&&m.image_versions2.candidates[0];
           if (c&&c.url) media.push({t:'photo', url:c.url});
@@ -85,11 +89,9 @@ class _BrowserScreenState extends State<BrowserScreen> {
     }
   }
 
-  function processJson(text) {
-    try { storeMedia(JSON.parse(text), 0); } catch(e) {}
-  }
+  function processJson(text) { try { storeMedia(JSON.parse(text), 0); } catch(e) {} }
 
-  // ── Intercepta fetch ──────────────────────────────────────────────────────
+  // ── Intercepção fetch ──────────────────────────────────────────────────
   var _oFetch = window.fetch;
   window.fetch = function() {
     var args = arguments;
@@ -101,7 +103,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
     });
   };
 
-  // ── Intercepta XHR ────────────────────────────────────────────────────────
+  // ── Intercepção XHR ────────────────────────────────────────────────────
   var _oO=XMLHttpRequest.prototype.open, _oS=XMLHttpRequest.prototype.send;
   XMLHttpRequest.prototype.open=function(m,u){this.__u=u||'';return _oO.apply(this,arguments);};
   XMLHttpRequest.prototype.send=function(){
@@ -110,7 +112,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
     return _oS.apply(this,arguments);
   };
 
-  // ── Extrai shortcode do article ───────────────────────────────────────────
+  // ── Coleta mídias de um article (cache da API > fallback DOM) ──────────
   function getCode(article) {
     var a = article.querySelector('a[href*="/p/"],a[href*="/reel/"]');
     if (!a) return null;
@@ -118,12 +120,10 @@ class _BrowserScreenState extends State<BrowserScreen> {
     return m ? m[2] : null;
   }
 
-  // ── Coleta mídias do article (API em cache > fallback DOM) ────────────────
   function collectMedia(article) {
     var code = getCode(article);
     if (code && _cache[code]) return _cache[code];
     var media = [];
-    // fallback: img/video visíveis no DOM
     article.querySelectorAll('img[src]').forEach(function(img) {
       var s = img.src;
       if (s && (s.includes('cdninstagram')||s.includes('fbcdn')) &&
@@ -136,71 +136,149 @@ class _BrowserScreenState extends State<BrowserScreen> {
     return media;
   }
 
-  // ── Ícone SVG de download (estilo dos ícones do Instagram) ───────────────
-  var DL_SVG = '<svg aria-label="Baixar" height="24" role="img" viewBox="0 0 24 24" '
-    + 'width="24" style="display:block"><path d="M12 15.5l-5-5h3V4h4v6.5h3l-5 5z" '
-    + 'fill="currentColor"/><rect x="3" y="18" width="18" height="2" rx="1" fill="currentColor"/></svg>';
-  var OK_SVG  = '<svg height="24" viewBox="0 0 24 24" width="24" style="display:block">'
-    + '<polyline points="20 6 9 17 4 12" stroke="currentColor" stroke-width="2.5" '
-    + 'fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  // ── Ícone SVG de download (inline, 18×18) ─────────────────────────────
+  var DL_ICON = '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" style="flex-shrink:0">'
+    + '<path d="M12 16l-6-6h4V3h4v7h4l-6 6z"/>'
+    + '<rect x="3" y="18" width="18" height="2" rx="1"/></svg>';
 
-  // ── Injeta botão de download no article ───────────────────────────────────
-  function injectBtn(article) {
-    if (article.querySelector('.__abobidl')) return;
-    // Aguarda a section de ações renderizar
-    var section = article.querySelector('section');
-    if (!section) return;
+  // ── Injeta nossas opções no topo do menu nativo do Instagram ───────────
+  function injectIntoMenu(ul, article) {
+    if (!ul || ul.querySelector('.__abobiOpt')) return;
 
-    var btn = document.createElement('button');
-    btn.className = '__abobidl';
-    btn.title = 'Baixar';
-    btn.setAttribute('type', 'button');
-    btn.style.cssText = [
-      'background:none', 'border:none', 'padding:8px', 'margin:0',
-      'cursor:pointer', 'color:inherit', 'display:flex',
-      'align-items:center', 'justify-content:center',
-      'opacity:0.9', 'flex-shrink:0'
-    ].join(';');
-    btn.innerHTML = DL_SVG;
+    var media = collectMedia(article);
+    var photos = media.filter(function(m){return m.t==='photo';});
+    var videos = media.filter(function(m){return m.t==='video';});
 
-    btn.addEventListener('click', function(e) {
-      e.preventDefault(); e.stopPropagation();
-      var media = collectMedia(article);
-      if (!media.length) {
-        notify('noMedia', {});
-        return;
+    var opts = [];
+
+    if (photos.length === 1) {
+      opts.push({label:'Baixar foto', subset: photos});
+    } else if (photos.length > 1) {
+      opts.push({label:'Baixar 1ª foto', subset:[photos[0]]});
+      opts.push({label:'Baixar todas as fotos ('+photos.length+')', subset:photos});
+    }
+
+    if (videos.length === 1) {
+      opts.push({label:'Baixar vídeo', subset: videos});
+    } else if (videos.length > 1) {
+      opts.push({label:'Baixar 1º vídeo', subset:[videos[0]]});
+      opts.push({label:'Baixar todos os vídeos ('+videos.length+')', subset:videos});
+    }
+
+    if (photos.length > 0 && videos.length > 0) {
+      opts.push({label:'Baixar tudo ('+media.length+')', subset:media, accent:true});
+    }
+
+    if (opts.length === 0) {
+      opts.push({label:'Mídia carregando, tente de novo', subset:[], disabled:true});
+    }
+
+    // Inserir separador e itens no topo da lista
+    var frag = document.createDocumentFragment();
+
+    opts.forEach(function(opt) {
+      var li = document.createElement('li');
+      li.className = '__abobiOpt';
+      li.style.cssText = 'list-style:none';
+
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.disabled = !!opt.disabled;
+      btn.style.cssText = [
+        'width:100%','background:none','border:none','cursor:pointer',
+        'padding:14px 16px','text-align:left',
+        'font-size:14px','font-family:inherit','font-weight:600',
+        'color:'+(opt.accent ? '#0095f6' : (opt.disabled ? '#999' : '#262626')),
+        'display:flex','align-items:center','gap:12px',
+        'border-bottom:0.5px solid #dbdbdb'
+      ].join(';');
+      btn.innerHTML = DL_ICON + '<span>' + opt.label + '</span>';
+
+      if (!opt.disabled) {
+        btn.addEventListener('click', function(e) {
+          e.stopPropagation();
+          if (opt.subset.length) notify('downloadRequest', opt.subset);
+          // Fecha o menu do Instagram
+          document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
+        });
       }
-      notify('downloadRequest', media);
-      btn.innerHTML = OK_SVG;
-      btn.style.opacity = '0.5';
-      btn.disabled = true;
+
+      li.appendChild(btn);
+      frag.appendChild(li);
     });
 
-    // Insere antes do último elemento da section (botão Salvar/Bookmark)
-    var last = section.lastElementChild;
-    if (last) section.insertBefore(btn, last);
-    else section.appendChild(btn);
+    // Separador visual entre nossas opções e as nativas
+    var sep = document.createElement('li');
+    sep.className = '__abobiOpt';
+    sep.style.cssText = 'list-style:none;height:6px;background:#fafafa;border-bottom:0.5px solid #dbdbdb';
+    frag.appendChild(sep);
+
+    ul.insertBefore(frag, ul.firstChild);
   }
 
-  // ── MutationObserver: detecta novos posts ─────────────────────────────────
-  new MutationObserver(function() {
-    document.querySelectorAll('article:not([data-abobi])').forEach(function(a) {
-      a.setAttribute('data-abobi', '1');
-      setTimeout(function(){ injectBtn(a); }, 300);
+  // ── Rastreia qual article teve o ⋯ clicado ────────────────────────────
+  var _pendingArticle = null;
+  var _pendingTimer = null;
+
+  document.addEventListener('click', function(e) {
+    var btn = e.target.closest('button');
+    if (!btn || !btn.querySelector('svg')) return;
+
+    var article = btn.closest('article');
+    if (!article) return;
+
+    // O botão ⋯ fica no <header> do article, não na <section> de ações
+    var header  = article.querySelector('header');
+    var section = article.querySelector('section');
+    if (!header || !header.contains(btn)) return; // não é do cabeçalho
+    if (section && section.contains(btn)) return;  // é da barra de ações
+
+    // Ignora botão de seguir/deixar de seguir
+    var label = (btn.getAttribute('aria-label') || '').toLowerCase();
+    if (label.includes('follow') || label.includes('seguir') ||
+        label.includes('unfollow') || label.includes('deixar')) return;
+
+    // É o botão ⋯ — registra o article e aguarda o menu abrir
+    _pendingArticle = article;
+    if (_pendingTimer) clearTimeout(_pendingTimer);
+    _pendingTimer = setTimeout(function(){ _pendingArticle = null; }, 3000);
+  }, true);
+
+  // ── MutationObserver: detecta menu nativo do Instagram abrindo ─────────
+  new MutationObserver(function(mutations) {
+    if (!_pendingArticle) return;
+    mutations.forEach(function(m) {
+      m.addedNodes.forEach(function(node) {
+        if (node.nodeType !== 1) return;
+
+        // Procura <ul> dentro de um contexto de diálogo/modal
+        var candidates = node.tagName === 'UL' ? [node]
+                       : Array.from(node.querySelectorAll('ul'));
+
+        candidates.forEach(function(ul) {
+          if (ul.children.length < 2) return;
+
+          // Confirma que está num overlay/dialog (posição fixed ou role=dialog)
+          var el = ul;
+          for (var depth=0; depth<6 && el && el!==document.body; depth++, el=el.parentElement) {
+            var role = el.getAttribute('role')||'';
+            var pos  = window.getComputedStyle(el).position;
+            if (role==='dialog' || role==='menu' || pos==='fixed' || pos==='absolute') {
+              if (_pendingTimer) { clearTimeout(_pendingTimer); _pendingTimer=null; }
+              injectIntoMenu(ul, _pendingArticle);
+              _pendingArticle = null;
+              return;
+            }
+          }
+        });
+      });
     });
   }).observe(document.body, {childList:true, subtree:true});
 
-  // ── Varredura periódica (fallback para SPA navigation) ────────────────────
-  setInterval(function() {
-    document.querySelectorAll('article').forEach(injectBtn);
-  }, 2000);
-  setTimeout(function(){
-    document.querySelectorAll('article').forEach(injectBtn);
-  }, 1200);
 })();
 ''';
 
-  // ── Manipula mensagens do JS ─────────────────────────────────────────────
+  // ── Manipula mensagens vindas do JS ───────────────────────────────────
   void _onMsg(String raw) {
     try {
       final msg = jsonDecode(raw) as Map<String, dynamic>;
@@ -220,8 +298,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
                 ? (items.first.isVideo ? 'Baixando vídeo...' : 'Baixando foto...')
                 : 'Baixando ${items.length} itens...');
           }
-        case 'noMedia':
-          _toast('Mídia ainda carregando, tente novamente.');
       }
     } catch (_) {}
   }
@@ -236,26 +312,25 @@ class _BrowserScreenState extends State<BrowserScreen> {
         behavior: SnackBarBehavior.floating,
         margin: const EdgeInsets.fromLTRB(16, 0, 16, 24),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        backgroundColor: const Color(0xFF1C1C2E),
+        backgroundColor: const Color(0xFF262626),
       ));
   }
 
   @override
   void initState() {
     super.initState();
-    // Tela cheia — só a barra de status aparece
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
       statusBarColor: Colors.transparent,
       statusBarIconBrightness: Brightness.dark,
       systemNavigationBarColor: Colors.transparent,
+      systemNavigationBarIconBrightness: Brightness.dark,
     ));
     _dlSub = DownloadQueueService.stream.listen((_) {
       if (!mounted) return;
       final done = DownloadQueueService.done;
-      final pending = DownloadQueueService.pending + DownloadQueueService.active;
-      if (done > 0 && pending == 0) {
-        _toast('Salvo na galeria! ($done itens)');
+      if (done > 0 && (DownloadQueueService.pending + DownloadQueueService.active) == 0) {
+        _toast('Salvo em Downloads/AbobiGram! ($done ${done == 1 ? "item" : "itens"})');
       }
     });
   }
@@ -279,7 +354,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
         }
       },
       child: Scaffold(
-        // Fundo branco = cor do Instagram enquanto carrega
         backgroundColor: Colors.white,
         body: InAppWebView(
           initialUrlRequest: URLRequest(url: WebUri(_loginUrl)),
@@ -296,7 +370,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
             safeBrowsingEnabled: false,
             mixedContentMode: MixedContentMode.MIXED_CONTENT_COMPATIBILITY_MODE,
             useHybridComposition: true,
-            // WebView usa todo o espaço incluindo atrás da barra de sistema
             verticalScrollBarEnabled: false,
             horizontalScrollBarEnabled: false,
           ),
