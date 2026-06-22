@@ -5,6 +5,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import '../models/media_item.dart';
 import '../services/download_queue_service.dart';
+import '../services/update_service.dart';
+import '../widgets/update_dialog.dart';
 
 class BrowserScreen extends StatefulWidget {
   const BrowserScreen({super.key});
@@ -22,23 +24,24 @@ class _BrowserScreenState extends State<BrowserScreen> {
       '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36 '
       'Instagram/275.0.0.27.98';
 
-  // ── JavaScript injetado em cada página ──────────────────────────────────
+  // ── JavaScript injetado ─────────────────────────────────────────────────
   //
-  // 1. Intercepta fetch/XHR para capturar URLs de máxima qualidade da API
-  //    interna do Instagram (incluindo todos os slides de carrossel).
+  // 1. Intercepta fetch/XHR para capturar URLs em qualidade máxima da API
+  //    interna do Instagram (suporta posts únicos e carrosséis completos).
   //
-  // 2. Monitora cliques no botão ⋯ (Mais opções) de cada post e, quando
-  //    o menu nativo do Instagram abre, injeta nossas opções de download
-  //    no topo da lista — o usuário mantém acesso às opções originais.
+  // 2. Detecta o clique no botão ⋯ (mais opções) de cada post.
+  //    Previne o menu nativo do Instagram e chama o Flutter com as mídias
+  //    do post. O Flutter mostra o BottomSheet com as opções de download.
+  //    Um botão "Ver opções do Instagram" reabre o menu nativo se necessário.
   static const _js = r'''
 (function() {
   if (window.__abobiOk) return;
   window.__abobiOk = true;
 
-  // ── Flutter handler ────────────────────────────────────────────────────
+  // ── Flutter channel ────────────────────────────────────────────────────
   function notify(type, data) {
     try { window.flutter_inappwebview.callHandler('onAbobi', JSON.stringify({type:type, data:data})); }
-    catch(e) {}
+    catch(e) { console.warn('[abobi] notify failed:', e); }
   }
 
   // ── Cache: shortcode → mídias capturadas da API ────────────────────────
@@ -46,239 +49,170 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   function storeMedia(o, d) {
     if (!o || typeof o !== 'object' || d > 14) return;
-    if (Array.isArray(o)) { for (var i=0; i<Math.min(o.length,60); i++) storeMedia(o[i], d+1); return; }
-
+    if (Array.isArray(o)) {
+      for (var i=0; i<Math.min(o.length,60); i++) storeMedia(o[i], d+1);
+      return;
+    }
     var code = o.code || o.shortcode || o.pk;
-    if (code) {
+    if (code && String(code).length > 4) {
       var media = [];
-      // Carrossel — formato GraphQL web
+      // Carrossel — GraphQL web
       if (o.edge_sidecar_to_children && o.edge_sidecar_to_children.edges) {
         o.edge_sidecar_to_children.edges.forEach(function(e) {
-          var n = e&&e.node; if(!n) return;
-          if (n.is_video && n.video_url) media.push({t:'video', url:n.video_url});
-          else if (n.display_url) media.push({t:'photo', url:n.display_url});
+          var n=e&&e.node; if(!n) return;
+          if(n.is_video && n.video_url) media.push({t:'video',url:n.video_url});
+          else if(n.display_url) media.push({t:'photo',url:n.display_url});
         });
       }
-      // Carrossel — formato API mobile
-      if (o.carousel_media) {
+      // Carrossel — API mobile
+      if (o.carousel_media && Array.isArray(o.carousel_media)) {
         o.carousel_media.forEach(function(m) {
-          var c = m.image_versions2&&m.image_versions2.candidates&&m.image_versions2.candidates[0];
-          if (c&&c.url) media.push({t:'photo', url:c.url});
-          var v = m.video_versions&&m.video_versions[0];
-          if (v&&v.url) media.push({t:'video', url:v.url});
+          var c=m.image_versions2&&m.image_versions2.candidates&&m.image_versions2.candidates[0];
+          if(c&&c.url) media.push({t:'photo',url:c.url});
+          var v=m.video_versions&&m.video_versions[0];
+          if(v&&v.url) media.push({t:'video',url:v.url});
         });
       }
       // Post único
       if (!media.length) {
-        var res = o.display_resources;
-        if (res&&res.length) { var b=res[res.length-1]; if(b&&b.src) media.push({t:'photo',url:b.src}); }
-        else if (o.display_url) media.push({t:'photo', url:o.display_url});
-        if (o.video_url) media.push({t:'video', url:o.video_url});
-        var c2 = o.image_versions2&&o.image_versions2.candidates&&o.image_versions2.candidates[0];
-        if (c2&&c2.url) media.push({t:'photo', url:c2.url});
-        var v2 = o.video_versions&&o.video_versions[0];
-        if (v2&&v2.url) media.push({t:'video', url:v2.url});
+        var res=o.display_resources;
+        if(res&&res.length){var b=res[res.length-1];if(b&&b.src)media.push({t:'photo',url:b.src});}
+        else if(o.display_url) media.push({t:'photo',url:o.display_url});
+        if(o.video_url) media.push({t:'video',url:o.video_url});
+        var c2=o.image_versions2&&o.image_versions2.candidates&&o.image_versions2.candidates[0];
+        if(c2&&c2.url) media.push({t:'photo',url:c2.url});
+        var v2=o.video_versions&&o.video_versions[0];
+        if(v2&&v2.url) media.push({t:'video',url:v2.url});
       }
-      if (media.length && !_cache[code]) _cache[code] = media;
+      if (media.length && !_cache[code]) {
+        _cache[code] = media;
+        console.log('[abobi] cached', media.length, 'items for', code);
+      }
     }
-
-    var keys = Object.keys(o);
-    for (var j=0; j<Math.min(keys.length,40); j++) {
-      var vv = o[keys[j]];
-      if (vv && typeof vv === 'object') storeMedia(vv, d+1);
+    var keys=Object.keys(o);
+    for(var j=0;j<Math.min(keys.length,40);j++){
+      var vv=o[keys[j]];
+      if(vv&&typeof vv==='object') storeMedia(vv,d+1);
     }
   }
 
-  function processJson(text) { try { storeMedia(JSON.parse(text), 0); } catch(e) {} }
+  function processJson(text) {
+    try { storeMedia(JSON.parse(text),0); } catch(e) {}
+  }
 
-  // ── Intercepção fetch ──────────────────────────────────────────────────
+  // ── Intercepta fetch ───────────────────────────────────────────────────
   var _oFetch = window.fetch;
   window.fetch = function() {
-    var args = arguments;
-    var url = typeof args[0]==='string' ? args[0] : (args[0]&&args[0].url||'');
-    return _oFetch.apply(this, args).then(function(res) {
-      if (/graphql|api\/v1|timeline|media/.test(url))
+    var args=arguments;
+    var url=typeof args[0]==='string'?args[0]:(args[0]&&args[0].url||'');
+    return _oFetch.apply(this,args).then(function(res){
+      if(/graphql|api\/v1|timeline|media|posts/.test(url))
         res.clone().text().then(processJson).catch(function(){});
       return res;
     });
   };
 
-  // ── Intercepção XHR ────────────────────────────────────────────────────
+  // ── Intercepta XHR ────────────────────────────────────────────────────
   var _oO=XMLHttpRequest.prototype.open, _oS=XMLHttpRequest.prototype.send;
   XMLHttpRequest.prototype.open=function(m,u){this.__u=u||'';return _oO.apply(this,arguments);};
   XMLHttpRequest.prototype.send=function(){
-    if(/graphql|api\/v1|timeline|media/.test(this.__u||''))
+    if(/graphql|api\/v1|timeline|media|posts/.test(this.__u||''))
       this.addEventListener('load',function(){processJson(this.responseText);});
     return _oS.apply(this,arguments);
   };
 
-  // ── Coleta mídias de um article (cache da API > fallback DOM) ──────────
-  function getCode(article) {
-    var a = article.querySelector('a[href*="/p/"],a[href*="/reel/"]');
-    if (!a) return null;
-    var m = a.href.match(/\/(p|reel)\/([^\/]+)\//);
-    return m ? m[2] : null;
+  // ── Coleta mídias a partir de um nó raiz ─────────────────────────────
+  function getShortcode(root) {
+    var a=root.querySelector('a[href*="/p/"],a[href*="/reel/"]');
+    if(!a) return null;
+    var m=a.href.match(/\/(p|reel)\/([^/?#]+)/);
+    return m?m[2]:null;
   }
 
-  function collectMedia(article) {
-    var code = getCode(article);
-    if (code && _cache[code]) return _cache[code];
-    var media = [];
-    article.querySelectorAll('img[src]').forEach(function(img) {
-      var s = img.src;
-      if (s && (s.includes('cdninstagram')||s.includes('fbcdn')) &&
-          !s.includes('150x150') && !s.includes('profile_pic') && !s.includes('s320x320'))
-        media.push({t:'photo', url:s});
+  // Sobe N níveis a partir do botão até encontrar o container do post
+  function findPostRoot(el) {
+    var cur=el, depth=0;
+    while(cur && depth<12) {
+      // Para quando encontrar imagem/vídeo do Instagram no container
+      if(cur.querySelector('img[src*="cdninstagram"],img[src*="fbcdn"],video[src*=".mp4"]'))
+        return cur;
+      cur=cur.parentElement; depth++;
+    }
+    return el.parentElement||document.body;
+  }
+
+  function collectMedia(root) {
+    var sc=getShortcode(root);
+    if(sc&&_cache[sc]) { console.log('[abobi] cache hit',_cache[sc].length,'for',sc); return _cache[sc]; }
+    var media=[], seen={};
+    root.querySelectorAll('img[src]').forEach(function(img){
+      var s=img.src;
+      if(s&&(s.includes('cdninstagram')||s.includes('fbcdn'))&&
+        !s.includes('150x150')&&!s.includes('profile_pic')&&
+        !s.includes('s320x320')&&!s.includes('s150x150')&&!seen[s]){
+        seen[s]=1; media.push({t:'photo',url:s});
+      }
     });
-    article.querySelectorAll('video[src]').forEach(function(v) {
-      if (v.src && v.src.includes('.mp4')) media.push({t:'video', url:v.src});
+    root.querySelectorAll('video[src]').forEach(function(v){
+      if(v.src&&v.src.includes('.mp4')&&!seen[v.src]){seen[v.src]=1;media.push({t:'video',url:v.src});}
     });
+    console.log('[abobi] DOM fallback:',media.length,'items from',root.tagName);
     return media;
   }
 
-  // ── Ícone SVG de download (inline, 18×18) ─────────────────────────────
-  var DL_ICON = '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" style="flex-shrink:0">'
-    + '<path d="M12 16l-6-6h4V3h4v7h4l-6 6z"/>'
-    + '<rect x="3" y="18" width="18" height="2" rx="1"/></svg>';
+  // ── Detecção do botão ⋯ (Mais opções / More options) ─────────────────
+  //
+  // Estratégia: usar aria-label como critério primário.
+  // O Instagram define aria-label="Mais opções" (PT-BR) ou "More options" (EN)
+  // nesse botão específico. Isso é mais confiável do que depender de tags HTML
+  // como <article> ou <header>, que podem mudar a qualquer update do Instagram.
 
-  // ── Injeta nossas opções no topo do menu nativo do Instagram ───────────
-  function injectIntoMenu(ul, article) {
-    if (!ul || ul.querySelector('.__abobiOpt')) return;
+  // Variações de "More options" em idiomas comuns:
+  var MORE_LABELS = [
+    'mais opções','more options','más opciones','plus d\'options',
+    'weitere optionen','meer opties','altre opzioni','diğer seçenekler',
+    'daha fazla seçenek','その他のオプション','더 보기','更多选项'
+  ];
 
-    var media = collectMedia(article);
-    var photos = media.filter(function(m){return m.t==='photo';});
-    var videos = media.filter(function(m){return m.t==='video';});
+  var _lastMoreBtn = null;
+  var _allowNext   = false;
 
-    var opts = [];
-
-    if (photos.length === 1) {
-      opts.push({label:'Baixar foto', subset: photos});
-    } else if (photos.length > 1) {
-      opts.push({label:'Baixar 1ª foto', subset:[photos[0]]});
-      opts.push({label:'Baixar todas as fotos ('+photos.length+')', subset:photos});
-    }
-
-    if (videos.length === 1) {
-      opts.push({label:'Baixar vídeo', subset: videos});
-    } else if (videos.length > 1) {
-      opts.push({label:'Baixar 1º vídeo', subset:[videos[0]]});
-      opts.push({label:'Baixar todos os vídeos ('+videos.length+')', subset:videos});
-    }
-
-    if (photos.length > 0 && videos.length > 0) {
-      opts.push({label:'Baixar tudo ('+media.length+')', subset:media, accent:true});
-    }
-
-    if (opts.length === 0) {
-      opts.push({label:'Mídia carregando, tente de novo', subset:[], disabled:true});
-    }
-
-    // Inserir separador e itens no topo da lista
-    var frag = document.createDocumentFragment();
-
-    opts.forEach(function(opt) {
-      var li = document.createElement('li');
-      li.className = '__abobiOpt';
-      li.style.cssText = 'list-style:none';
-
-      var btn = document.createElement('button');
-      btn.type = 'button';
-      btn.disabled = !!opt.disabled;
-      btn.style.cssText = [
-        'width:100%','background:none','border:none','cursor:pointer',
-        'padding:14px 16px','text-align:left',
-        'font-size:14px','font-family:inherit','font-weight:600',
-        'color:'+(opt.accent ? '#0095f6' : (opt.disabled ? '#999' : '#262626')),
-        'display:flex','align-items:center','gap:12px',
-        'border-bottom:0.5px solid #dbdbdb'
-      ].join(';');
-      btn.innerHTML = DL_ICON + '<span>' + opt.label + '</span>';
-
-      if (!opt.disabled) {
-        btn.addEventListener('click', function(e) {
-          e.stopPropagation();
-          if (opt.subset.length) notify('downloadRequest', opt.subset);
-          // Fecha o menu do Instagram
-          document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
-        });
-      }
-
-      li.appendChild(btn);
-      frag.appendChild(li);
-    });
-
-    // Separador visual entre nossas opções e as nativas
-    var sep = document.createElement('li');
-    sep.className = '__abobiOpt';
-    sep.style.cssText = 'list-style:none;height:6px;background:#fafafa;border-bottom:0.5px solid #dbdbdb';
-    frag.appendChild(sep);
-
-    ul.insertBefore(frag, ul.firstChild);
-  }
-
-  // ── Rastreia qual article teve o ⋯ clicado ────────────────────────────
-  var _pendingArticle = null;
-  var _pendingTimer = null;
+  // Flutter chama isso para abrir o menu nativo após fechar nosso sheet
+  window.__abobiOpenNative = function() {
+    if (_lastMoreBtn) { _allowNext=true; _lastMoreBtn.click(); }
+  };
 
   document.addEventListener('click', function(e) {
-    var btn = e.target.closest('button');
-    if (!btn || !btn.querySelector('svg')) return;
+    if (_allowNext) { _allowNext=false; return; }
 
-    var article = btn.closest('article');
-    if (!article) return;
+    var el=e.target.closest('button,[role="button"]');
+    if (!el) return;
 
-    // O botão ⋯ fica no <header> do article, não na <section> de ações
-    var header  = article.querySelector('header');
-    var section = article.querySelector('section');
-    if (!header || !header.contains(btn)) return; // não é do cabeçalho
-    if (section && section.contains(btn)) return;  // é da barra de ações
+    var label=(el.getAttribute('aria-label')||'').toLowerCase().trim();
 
-    // Ignora botão de seguir/deixar de seguir
-    var label = (btn.getAttribute('aria-label') || '').toLowerCase();
-    if (label.includes('follow') || label.includes('seguir') ||
-        label.includes('unfollow') || label.includes('deixar')) return;
+    // Verificação primária: aria-label exato ou parcial de "mais opções"
+    var isMore=MORE_LABELS.some(function(l){return label===l||label.includes(l);});
 
-    // É o botão ⋯ — registra o article e aguarda o menu abrir
-    _pendingArticle = article;
-    if (_pendingTimer) clearTimeout(_pendingTimer);
-    _pendingTimer = setTimeout(function(){ _pendingArticle = null; }, 3000);
+    // Fallback: qualquer botão com SVG que tenha "opç" ou "option" no label
+    if(!isMore) isMore=(label.includes('opç')||label.includes('option'))&&!!el.querySelector('svg');
+
+    if(!isMore) return;
+
+    console.log('[abobi] ⋯ detectado, label="'+label+'"');
+    e.stopPropagation();
+    e.preventDefault();
+
+    _lastMoreBtn=el;
+    var root=el.closest('article')||findPostRoot(el);
+    var media=collectMedia(root);
+    notify('showMenu',{media:media,sc:getShortcode(root)||''});
   }, true);
 
-  // ── MutationObserver: detecta menu nativo do Instagram abrindo ─────────
-  new MutationObserver(function(mutations) {
-    if (!_pendingArticle) return;
-    mutations.forEach(function(m) {
-      m.addedNodes.forEach(function(node) {
-        if (node.nodeType !== 1) return;
-
-        // Procura <ul> dentro de um contexto de diálogo/modal
-        var candidates = node.tagName === 'UL' ? [node]
-                       : Array.from(node.querySelectorAll('ul'));
-
-        candidates.forEach(function(ul) {
-          if (ul.children.length < 2) return;
-
-          // Confirma que está num overlay/dialog (posição fixed ou role=dialog)
-          var el = ul;
-          for (var depth=0; depth<6 && el && el!==document.body; depth++, el=el.parentElement) {
-            var role = el.getAttribute('role')||'';
-            var pos  = window.getComputedStyle(el).position;
-            if (role==='dialog' || role==='menu' || pos==='fixed' || pos==='absolute') {
-              if (_pendingTimer) { clearTimeout(_pendingTimer); _pendingTimer=null; }
-              injectIntoMenu(ul, _pendingArticle);
-              _pendingArticle = null;
-              return;
-            }
-          }
-        });
-      });
-    });
-  }).observe(document.body, {childList:true, subtree:true});
-
+  console.log('[abobi] script injetado OK');
 })();
 ''';
 
-  // ── Manipula mensagens vindas do JS ───────────────────────────────────
+  // ── Mensagens do JS ──────────────────────────────────────────────────
   void _onMsg(String raw) {
     try {
       final msg = jsonDecode(raw) as Map<String, dynamic>;
@@ -286,20 +220,57 @@ class _BrowserScreenState extends State<BrowserScreen> {
       final data = msg['data'];
 
       switch (type) {
+        case 'showMenu':
+          if (data is Map) {
+            final rawList = data['media'];
+            final items = rawList is List
+                ? rawList
+                    .map((e) => MediaItem.fromMap(e as Map<String, dynamic>))
+                    .where((m) => m.url.isNotEmpty)
+                    .toList()
+                : <MediaItem>[];
+            _showDownloadSheet(items);
+          }
         case 'downloadRequest':
           if (data is List) {
             final items = data
                 .map((e) => MediaItem.fromMap(e as Map<String, dynamic>))
                 .where((m) => m.url.isNotEmpty)
                 .toList();
-            if (items.isEmpty) return;
-            DownloadQueueService.enqueue(items);
-            _toast(items.length == 1
-                ? (items.first.isVideo ? 'Baixando vídeo...' : 'Baixando foto...')
-                : 'Baixando ${items.length} itens...');
+            _startDownload(items);
           }
       }
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('[BrowserScreen] _onMsg error: $e');
+    }
+  }
+
+  void _startDownload(List<MediaItem> items) {
+    if (items.isEmpty) return;
+    DownloadQueueService.enqueue(items);
+    _toast(items.length == 1
+        ? (items.first.isVideo ? 'Baixando vídeo...' : 'Baixando foto...')
+        : 'Baixando ${items.length} itens...');
+  }
+
+  void _showDownloadSheet(List<MediaItem> media) {
+    if (!mounted) return;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (_) => _DownloadSheet(
+        media: media,
+        onDownload: (items) {
+          Navigator.pop(context);
+          _startDownload(items);
+        },
+        onNativeMenu: () {
+          Navigator.pop(context);
+          _ctrl?.evaluateJavascript(source: 'window.__abobiOpenNative && window.__abobiOpenNative()');
+        },
+      ),
+    );
   }
 
   void _toast(String msg) {
@@ -331,6 +302,18 @@ class _BrowserScreenState extends State<BrowserScreen> {
       final done = DownloadQueueService.done;
       if (done > 0 && (DownloadQueueService.pending + DownloadQueueService.active) == 0) {
         _toast('Salvo em Downloads/AbobiGram! ($done ${done == 1 ? "item" : "itens"})');
+      }
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await Future.delayed(const Duration(seconds: 3));
+      if (!mounted) return;
+      final info = await UpdateService.checkForUpdate();
+      if (info != null && mounted) {
+        showDialog(
+          context: context,
+          barrierDismissible: true,
+          builder: (_) => UpdateDialog(info: info),
+        );
       }
     });
   }
@@ -390,12 +373,216 @@ class _BrowserScreenState extends State<BrowserScreen> {
             return NavigationActionPolicy.ALLOW;
           },
           onLoadStart: (c, url) async {
-            await Future.delayed(const Duration(milliseconds: 200));
+            await Future.delayed(const Duration(milliseconds: 150));
             c.evaluateJavascript(source: _js);
           },
           onLoadStop: (c, url) async {
             await c.evaluateJavascript(source: _js);
           },
+          onConsoleMessage: (c, msg) {
+            if (msg.message.startsWith('[abobi]')) {
+              debugPrint('WebView: ${msg.message}');
+            }
+          },
+        ),
+      ),
+    );
+  }
+}
+
+// ── BottomSheet de download ──────────────────────────────────────────────
+class _DownloadSheet extends StatelessWidget {
+  const _DownloadSheet({
+    required this.media,
+    required this.onDownload,
+    required this.onNativeMenu,
+  });
+
+  final List<MediaItem> media;
+  final void Function(List<MediaItem>) onDownload;
+  final VoidCallback onNativeMenu;
+
+  List<MediaItem> get photos => media.where((m) => !m.isVideo).toList();
+  List<MediaItem> get videos => media.where((m) => m.isVideo).toList();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(14)),
+      ),
+      child: SafeArea(
+        top: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Handle
+            Container(
+              margin: const EdgeInsets.only(top: 10, bottom: 4),
+              width: 36, height: 4,
+              decoration: BoxDecoration(
+                color: Colors.grey[300],
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            // Título
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
+              child: Row(
+                children: [
+                  const Icon(Icons.download_rounded, size: 20, color: Color(0xFF262626)),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Download',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                      color: Colors.grey[900],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 1),
+
+            if (media.isEmpty) ...[
+              Padding(
+                padding: const EdgeInsets.all(28),
+                child: Column(
+                  children: [
+                    Icon(Icons.hourglass_empty_rounded, size: 32, color: Colors.grey[400]),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Mídia ainda carregando.\nRole o post um pouco e tente novamente.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Colors.grey[600], fontSize: 14),
+                    ),
+                  ],
+                ),
+              ),
+            ] else ...[
+              // ── Opções de foto ──────────────────────────────────────
+              if (photos.isNotEmpty) ...[
+                if (photos.length == 1)
+                  _Option(
+                    icon: Icons.photo_outlined,
+                    label: 'Baixar foto',
+                    onTap: () => onDownload(photos),
+                  )
+                else ...[
+                  _Option(
+                    icon: Icons.photo_outlined,
+                    label: 'Baixar 1ª foto',
+                    onTap: () => onDownload([photos.first]),
+                  ),
+                  _Option(
+                    icon: Icons.photo_library_outlined,
+                    label: 'Baixar todas as fotos (${photos.length})',
+                    onTap: () => onDownload(photos),
+                  ),
+                ],
+              ],
+              // ── Opções de vídeo ─────────────────────────────────────
+              if (videos.isNotEmpty) ...[
+                if (videos.length == 1)
+                  _Option(
+                    icon: Icons.videocam_outlined,
+                    label: 'Baixar vídeo',
+                    onTap: () => onDownload(videos),
+                  )
+                else ...[
+                  _Option(
+                    icon: Icons.videocam_outlined,
+                    label: 'Baixar 1º vídeo',
+                    onTap: () => onDownload([videos.first]),
+                  ),
+                  _Option(
+                    icon: Icons.video_library_outlined,
+                    label: 'Baixar todos os vídeos (${videos.length})',
+                    onTap: () => onDownload(videos),
+                  ),
+                ],
+              ],
+              // ── Baixar tudo (se tem fotos E vídeos) ─────────────────
+              if (photos.isNotEmpty && videos.isNotEmpty)
+                _Option(
+                  icon: Icons.download_for_offline_outlined,
+                  label: 'Baixar tudo (${media.length} itens)',
+                  onTap: () => onDownload(media),
+                  accent: true,
+                ),
+            ],
+
+            const Divider(height: 1),
+            // ── Ver opções nativas do Instagram ──────────────────────
+            _Option(
+              icon: Icons.more_horiz_rounded,
+              label: 'Ver opções do Instagram',
+              onTap: onNativeMenu,
+              secondary: true,
+            ),
+            // ── Cancelar ─────────────────────────────────────────────
+            _Option(
+              icon: Icons.close_rounded,
+              label: 'Cancelar',
+              onTap: () => Navigator.pop(context),
+              isCancel: true,
+            ),
+            const SizedBox(height: 4),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _Option extends StatelessWidget {
+  const _Option({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    this.accent = false,
+    this.secondary = false,
+    this.isCancel = false,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  final bool accent;
+  final bool secondary;
+  final bool isCancel;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = isCancel
+        ? Colors.grey[500]!
+        : secondary
+            ? Colors.grey[700]!
+            : accent
+                ? const Color(0xFF0095F6)
+                : const Color(0xFF262626);
+
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15),
+        child: Row(
+          children: [
+            Icon(icon, color: color, size: 22),
+            const SizedBox(width: 16),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 15,
+                color: color,
+                fontWeight: (accent || (!secondary && !isCancel))
+                    ? FontWeight.w600
+                    : FontWeight.normal,
+              ),
+            ),
+          ],
         ),
       ),
     );
