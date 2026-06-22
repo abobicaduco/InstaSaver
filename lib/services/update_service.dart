@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class UpdateInfo {
@@ -12,7 +13,6 @@ class UpdateInfo {
 class UpdateService {
   static const _owner = 'abobicaduco';
   static const _repo = 'InstaSaver';
-  static const _current = '3.1.0';
   static const _prefsKey = 'update_last_check_ms';
 
   static Future<UpdateInfo?> checkForUpdate() async {
@@ -23,11 +23,13 @@ class UpdateService {
       if (now - last < const Duration(hours: 4).inMilliseconds) return null;
       await prefs.setInt(_prefsKey, now);
 
+      final current = (await PackageInfo.fromPlatform()).version;
+
       final client = HttpClient();
       final req = await client.getUrl(
         Uri.parse('https://api.github.com/repos/$_owner/$_repo/releases/latest'),
       );
-      req.headers.set('User-Agent', 'AboBI-App/1.0');
+      req.headers.set('User-Agent', 'AboBI-App/$current');
       req.headers.set('Accept', 'application/vnd.github+json');
       final res = await req.close().timeout(const Duration(seconds: 10));
       if (res.statusCode != 200) return null;
@@ -36,7 +38,7 @@ class UpdateService {
 
       final json = jsonDecode(body) as Map<String, dynamic>;
       final tag = (json['tag_name'] as String? ?? '').replaceFirst('v', '');
-      if (tag.isEmpty || !_isNewer(tag, _current)) return null;
+      if (tag.isEmpty || !_isNewer(tag, current)) return null;
 
       final assets = (json['assets'] as List<dynamic>);
       final arm64 = assets.where((a) => (a['name'] as String).contains('arm64')).toList();

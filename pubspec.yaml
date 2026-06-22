@@ -1,7 +1,7 @@
 name: abobigram
 description: "Instagram browser com download de mídia em qualidade máxima"
 publish_to: 'none'
-version: 3.1.0+1
+version: 3.2.0+2
 
 environment:
   sdk: ^3.12.2
@@ -16,6 +16,7 @@ dependencies:
   dio: ^5.7.0
   url_launcher: ^6.3.0
   shared_preferences: ^2.5.3
+  package_info_plus: ^9.0.1
 
 
 dev_dependencies:
